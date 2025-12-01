@@ -6,7 +6,6 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    # Tambahkan lebih banyak waktu timeout jika diperlukan
     timeout-minutes: 3600
 
     steps:
@@ -58,7 +57,6 @@ jobs:
               exit 1
           }
 
-      # Hapus duplikasi: Install Tailscale sekarang hanya ada satu kali
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
@@ -68,60 +66,52 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
-      - name: Establish Tailscale Connection (FIXED)
+      - name: Establish Tailscale Connection
         run: |
-          $tailscalePath = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          $maxRetries = 30 # Beri waktu lebih lama (30 * 5 = 150 detik)
-          $retries = 0
-
-          # 1. Cek dan tunggu sampai layanan Tailscale siap (opsional, tapi lebih aman)
-          while ($retries -lt 6) { # Cek 6 kali (30 detik)
-              try {
-                  # Perintah ini akan gagal jika layanan belum siap
-                  & $tailscalePath status | Out-Null
-                  Write-Host "Tailscale service is responsive."
-                  break
-              }
-              catch {
-                  Write-Host "Tailscale service not fully ready, waiting..."
-                  Start-Sleep -Seconds 5
-                  $retries++
-              }
-          }
+          # Bring up Tailscale with the provided auth key and set a unique hostname
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
           
-          # 2. Jalankan Tailscale up
-          Write-Host "Starting Tailscale connection..."
-          # Gunakan --reset agar tidak terpengaruh status sebelumnya
-          & $tailscalePath up --reset --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          
-          # 3. Tunggu hingga Tailscale berstatus "Logged in" dan mendapatkan IP
+          # Wait for Tailscale to assign an IP
           $tsIP = $null
           $retries = 0
-          
-          while ($retries -lt $maxRetries) {
-              Write-Host "Checking Tailscale login status... Attempt $($retries + 1)/$maxRetries"
-              
-              # Cek status Tailscale
-              $statusOutput = & $tailscalePath status
-              
-              if ($statusOutput -match "Logged in") {
-                  # Ambil IP setelah status Logged in
-                  $tsIP = & $tailscalePath ip -4 | Select-Object -First 1
-                  if ($tsIP) {
-                      Write-Host "Tailscale is logged in and IP assigned: $tsIP"
-                      break
-                  }
-              }
-              
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
               Start-Sleep -Seconds 5
               $retries++
           }
           
           if (-not $tsIP) {
-              Write-Error "Tailscale failed to get an IP or log in after multiple attempts. Exiting."
+              Write-Error "Tailscale IP not assigned. Exiting."
               exit 1
           }
+         
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
           
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
+        run: |
+          # Bring up Tailscale with the provided auth key and set a unique hostname
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          
+          # Wait for Tailscale to assign an IP
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
       
       - name: Verify RDP Accessibility
